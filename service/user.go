@@ -20,6 +20,12 @@ func (service *UserRegisterService) Register() serializer.Response {
 			Msg:    "User is already exist.",
 		}
 	}
+	if service.UserName == "" { //添加用户名判断条件
+		return serializer.Response{
+			Status: 400,
+			Msg:    "UserName is empty.",
+		}
+	}
 	user = model.User{
 		UserName: service.UserName,
 	}
