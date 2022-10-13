@@ -1,9 +1,14 @@
 package service
 
 import (
+	"chat/cache"
+	"chat/pkg/e"
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	logging "github.com/sirupsen/logrus"
 	"net/http"
+	"time"
 )
 
 const month = 60 * 60 * 24 * 30 //默认一个月30天
@@ -60,7 +65,7 @@ func CreateID(uid, toUid string) string {
 }
 
 func Handler(context *gin.Context) {
-	uid := context.Query("id")
+	uid := context.Query("uid")
 	toUid := context.Query("toUid")
 	conn, err := (&websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -87,9 +92,65 @@ func Handler(context *gin.Context) {
 }
 
 func (client *Client) Read() {
+	//让Read操作完成时，回收资源，Client回到Manger的Unregister中
+	defer func() {
+		Manager.Unregister <- client
+		_ = client.Socket.Close()
+	}()
 
+	for true {
+		client.Socket.PongHandler()
+		sendMsg := new(SendMsg)
+		err := client.Socket.ReadJSON(&sendMsg)
+		if err != nil {
+			logging.Info("Wrong data format.")
+			Manager.Unregister <- client
+			_ = client.Socket.Close()
+			break
+		}
+		if sendMsg.Type == 1 { //发送消息
+			r1, _ := cache.RedisClient.Get(client.ID).Result()     //1->2
+			r2, _ := cache.RedisClient.Get(client.SendID).Result() //2->1
+			if r1 > "3" && r2 == "" {
+				replyMsg := ReplyMsg{
+					Code:    e.WebsocketLimit,
+					Content: e.GetMsg(e.WebsocketLimit),
+				}
+				msg, _ := json.Marshal(replyMsg)
+				_ = client.Socket.WriteMessage(websocket.TextMessage, msg)
+				continue
+			} else {
+				cache.RedisClient.Incr(client.ID)
+				_, _ = cache.RedisClient.Expire(client.ID, time.Hour*24*30*3).Result()
+				//防止过快"分手"，设置三个月过期
+			}
+			Manager.Broadcast <- &Broadcast{
+				Client:  client,
+				Message: []byte(sendMsg.Content),
+			}
+		}
+	}
 }
 
 func (client *Client) Write() {
+	defer func() {
+		_ = client.Socket.Close()
 
+	}()
+
+	for true {
+		select {
+		case _, ok := <-client.Send:
+			if !ok {
+				_ = client.Socket.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			replymsg := ReplyMsg{
+				Code:    e.WebsocketSuccessMessage,
+				Content: e.GetMsg(e.WebsocketSuccessMessage),
+			}
+			msg, _ := json.Marshal(replymsg)
+			_ = client.Socket.WriteMessage(websocket.TextMessage, msg)
+		}
+	}
 }
